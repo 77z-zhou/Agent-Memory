@@ -24,7 +24,7 @@ class BaseStorage(ABC):
 
 
     @abstractmethod
-    def add_mid_term_memory(self, user_id: str, segments: dict, access_frequency: dict):
+    def add_mid_term_memory(self, user_id: str, segments: dict):
         """Add mid term memory"""
         ...
 

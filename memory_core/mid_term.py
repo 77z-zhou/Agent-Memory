@@ -32,7 +32,8 @@ class MidTermMemory:
 
         # 定义存储结构
         self.segments = defaultdict(lambda: defaultdict(dict))  # {user_id: {segment_id: segment_obj}}
-        self.access_frequency = defaultdict(lambda: defaultdict(int)) # {user_id: {segment_id: access_count_for_lfu}}
+        
+        self.lfu_heap = defaultdict(list)   # {user_id: []}
         self.heap = defaultdict(list)  # {user_id: []}
 
         self.storage = storage
@@ -107,14 +108,14 @@ class MidTermMemory:
             "H_segment": 0.0, # Initial heat, will be computed
             "timestamp": current_ts, # Creation timestamp
             "last_visit_time": current_ts, # Also initial last_visit_time for recency calc
-            "access_count_lfu": 0 # For LFU eviction policy
         }
         # 计算热力值
         segment_obj["H_segment"] = compute_segment_heat(segment_obj)
 
         self.segments[user_id][segment_id] = segment_obj
-        self.access_frequency[user_id][segment_id] = 0  # 初始化 LFU
+
         heapq.heappush(self.heap[user_id], (-segment_obj["H_segment"], segment_id)) # 大顶堆
+        heapq.heappush(self.lfu_heap[user_id], (segment_obj["H_segment"], segment_id)) # 小顶堆
 
         # segments 超过最大容量, 需要弹出访问次数最小的segment
         if len(self.segments[user_id]) > self.max_capacity:
@@ -122,9 +123,6 @@ class MidTermMemory:
 
         return segment_id
         
-
-
-
 
     def insert_pages_into_segment(
         self,
@@ -215,7 +213,7 @@ class MidTermMemory:
 
                 target_segment = self.segments[user_id][best_sid]
                 target_segment["details"].append(processed_page)
-                segment_summary =  self.multitask_llm.generate_segment_summary(target_segment.get("details",[]))
+                segment_summary = self.multitask_llm.generate_segment_summary(target_segment.get("details",[]))
                 target_segment["summary"] = segment_summary.summary
                 summary_embed = self.embedding_func.embed_documents([target_segment["summary"]])[0]
                 target_segment["summary_embedding"] = normalize_vector(summary_embed).tolist()
@@ -238,8 +236,22 @@ class MidTermMemory:
         self.save(user_id)
 
 
-
     def evict_lfu(self, user_id):
+
+        if not self.lfu_heap[user_id] or not self.segments[user_id]:
+            return
+        
+        # 获取热力值最低的
+        lfu_sid = self.lfu_heap[user_id][0][1]
+
+        # 删除热力值最低的 segment
+        self.segments[user_id].pop(lfu_sid)
+
+        # 重建堆
+        self.rebuild_heap(user_id)
+
+
+    def evict_lfu_(self, user_id):
         # base case
         if not self.access_frequency[user_id] or not self.segments[user_id]:
             return
@@ -310,6 +322,7 @@ class MidTermMemory:
                 page_embeddings_np = np.array(page_embeddings, dtype=np.float32)
                 index.add(page_embeddings_np)
                 page_distance, page_indices = index.search(query_arr_np)
+                index.reset()  # clear
 
                 for p_i, p_idx in enumerate(page_indices):
                     page_semantic_sim_score = float(page_distance[0][p_i])
@@ -320,8 +333,6 @@ class MidTermMemory:
                 if matched_pages:
                     segment["N_visit"] += 1
                     segment["last_visit_time"] = current_time_str
-                    segment["access_count_lfu"] = segment.get("access_count_lfu", 0) + 1
-                    self.access_frequency[user_id][sid] = segment["access_count_lfu"]
                     segment["H_segment"] = compute_segment_heat(segment)
                     
                     results.append({
@@ -331,42 +342,36 @@ class MidTermMemory:
                         "matched_pages": sorted(matched_pages, key=lambda x: x["score"], reverse=True) # Sort pages by score
                     })
 
-        self.rebuild_heap(user_id)
+        self.rebuild_heap(user_id)  # 热力值改变了
         self.save(user_id)
         return sorted(results, key=lambda x: x["segment_relevance_score"], reverse=True)
-
-
-        
-
-
-        
-        
-
 
 
     
     def rebuild_heap(self, user_id):
         """ 重建单个用户堆 """
         self.heap[user_id] = []
+        self.lfu_heap[user_id] = []
         user_segments = self.segments[user_id]
         for sid, segment in user_segments.items():
-            heapq.heappush(self.heap[user_id], (-segment["H_segment"], sid))
+            heapq.heappush(self.lfu_heap[user_id], (segment["H_segment"], sid)) # 小顶堆
+            heapq.heappush(self.heap[user_id], (-segment["H_segment"], sid)) # 大顶堆
 
     def rebuild_all_user_heap(self):
         """ 重建所有用户堆 """
         for user_id in self.segments.keys():
             for sid, segment in self.segments[user_id].items():
-                heapq.heappush(self.heap[user_id], (-segment["H_segment"], sid))
+                heapq.heappush(self.lfu_heap[user_id], (segment["H_segment"], sid)) # 小顶堆
+                heapq.heappush(self.heap[user_id], (-segment["H_segment"], sid)) # 大顶堆
 
     def save(self, user_id):
-        self.storage.add_mid_term_memory(user_id, self.segments[user_id], self.access_frequency[user_id])
+        self.storage.add_mid_term_memory(user_id, self.segments[user_id])
         
     
     def load(self):
         try:
-            segments, access_frequency = self.storage.load_mid_term_memory()
+            segments = self.storage.load_mid_term_memory()
             self.segments = segments
-            self.access_frequency = access_frequency
             self.rebuild_all_user_heap()
         except Exception as e:
             logger.error(f"MidTermMemory: Error loading: {e}. Initializing new memory.")

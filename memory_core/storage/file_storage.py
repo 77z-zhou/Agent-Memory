@@ -92,14 +92,13 @@ class FileStorage(BaseStorage):
 
 
 
-    def add_mid_term_memory(self, user_id, segments: dict, access_frequency: dict):
+    def add_mid_term_memory(self, user_id, segments: dict):
         """ 全量保存中期记忆 """
         try:
             user_mid_term_path = os.path.join(self.mid_term_dir, f"{user_id}.json")
             ensure_directory_exists(user_mid_term_path)
             save_memory = {
-                "segments": segments,
-                "access_frequency": access_frequency
+                "segments": segments
             }
             with open(user_mid_term_path, "w", encoding="utf8") as f:
                 json.dump(save_memory, f, ensure_ascii=False, indent=2)
@@ -140,7 +139,6 @@ class FileStorage(BaseStorage):
         try:
             users_mid_terms = os.listdir(self.mid_term_dir)
             segments = defaultdict(lambda: defaultdict(dict))  # {user_id: {segment_id: segment_obj}}
-            access_frequency = defaultdict(lambda: defaultdict(int)) # {user_id: {segment_id: access_count_for_lfu}}
 
             for user_mid_term in users_mid_terms:
                 user_id = user_mid_term.split(".")[0]
@@ -149,12 +147,11 @@ class FileStorage(BaseStorage):
                     mid_metadata = json.load(f)
 
                 user_segments = mid_metadata.get("segments")
-                user_access_frequency = mid_metadata.get("access_frequency")
+        
                 for segment_id, segment in user_segments.items():
                     segments[user_id][segment_id] = segment
-                    access_frequency[user_id][segment_id] = user_access_frequency[segment_id]
-                 
-            return segments, access_frequency
+                   
+            return segments
         except Exception as e:
             logger.info(f"Error loading MidTermMemory from {self.mid_term_dir}: {e}")  
             raise e   
